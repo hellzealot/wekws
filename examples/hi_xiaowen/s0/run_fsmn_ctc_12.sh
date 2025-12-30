@@ -4,26 +4,26 @@
 
 . ./path.sh
 
-stage=2
+stage=3
 stop_stage=3
-num_keywords=2599
+num_keywords=71
 
-config=conf/fsmn_ctc.yaml
+config=conf/fsmn_ctc_12.yaml
 norm_mean=true
 norm_var=true
 gpus="0"
 
 checkpoint=
-dir=exp/fsmn_ctc
+dir=/home/hlj/wekws/wekws/examples/hi_xiaowen/s0/modelzoo/fsmn_ctc_12
 average_model=true
-num_average=30
+num_average=300
 if $average_model ;then
   score_checkpoint=$dir/avg_${num_average}.pt
 else
   score_checkpoint=$dir/final.pt
 fi
 
-download_dir=~/wekws/Dataset/nihaowenwen # your data dir
+download_dir=/mnt/h/GigaSpeechV1/KWS # your data dir
 
 . tools/parse_options.sh || exit 1;
 window_shift=50

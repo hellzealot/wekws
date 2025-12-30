@@ -31,7 +31,8 @@ from collections import defaultdict
 from wekws.model.kws_model import init_model
 from wekws.utils.checkpoint import load_checkpoint
 from tools.make_list import query_token_set, read_lexicon, read_token
-
+import warnings
+warnings.filterwarnings("ignore")
 
 def get_args():
     parser = argparse.ArgumentParser(description='detect keywords online.')
@@ -152,6 +153,8 @@ def ctc_prefix_beam_search(t, probs, cur_hyps, keywords_idxset,
             if prob > 0.05 and idx in keywords_idxset:
                 filter_probs.append(prob)
                 filter_index.append(idx)
+                if idx != 0:
+                    print(f"filter add : {idx},prob : {prob}")
         else:
             if prob > 0.05:
                 filter_probs.append(prob)
@@ -241,11 +244,11 @@ class KeyWordSpotter(torch.nn.Module):
         # feature related
         self.sample_rate = 16000
         self.wave_remained = np.array([])
-        self.num_mel_bins = dataset_conf['feature_extraction_conf'][
+        self.num_mel_bins = dataset_conf['fbank_conf'][
             'num_mel_bins']
-        self.frame_length = dataset_conf['feature_extraction_conf'][
+        self.frame_length = dataset_conf['fbank_conf'][
             'frame_length']  # in ms
-        self.frame_shift = dataset_conf['feature_extraction_conf'][
+        self.frame_shift = dataset_conf['fbank_conf'][
             'frame_shift']  # in ms
         self.downsampling = dataset_conf.get('frame_skip', 1)
         self.resolution = self.frame_shift / 1000  # in second
@@ -300,6 +303,9 @@ class KeyWordSpotter(torch.nn.Module):
         self.total_frames = 0  # frame offset, for absolute time
         self.last_active_pos = -1  # the last frame of being activated
         self.result = {}
+        self.forward_count = 0
+        self.wav_chunk_count = 0
+        self.batch_count = 0
 
     def set_keywords(self, keywords):
         # 4. parse keywords tokens
@@ -331,6 +337,29 @@ class KeyWordSpotter(torch.nn.Module):
         logging.info(f'Token set is: {token_print}')
         self.keywords_idxset = keywords_idxset
         self.keywords_token = keywords_token
+    
+    def set_tokens(self, tokens):
+        keywords_idxset = {0}
+        keywords_strset = {'<blk>'}
+        keywords_token = {}
+        keyword = ""
+        indexes = tuple()
+        for token in tokens:
+            if token in self.token_table:
+                keywords_idxset.add(self.token_table[token])
+                indexes += (self.token_table[token],)
+                keywords_strset.add(token)
+                keyword += token + " "
+        keyword = keyword.strip()
+        keywords_token[keyword] = {}
+        keywords_token[keyword]['token_id'] = indexes
+        keywords_token[keyword]['token_str'] = ''.join('%s ' % str(i)
+                                                           for i in indexes)
+        
+        self.keywords_idxset = keywords_idxset
+        self.keywords_token = keywords_token
+        logging.info(f'Token set is: {keywords_token}')
+
 
     def accept_wave(self, wave):
         assert isinstance(wave, bytes), \
@@ -512,6 +541,68 @@ class KeyWordSpotter(torch.nn.Module):
                 self.reset()
 
         return self.result
+    
+    def find_token_by_index(self,index):
+        index -= 1
+        for token, idx in self.token_table.items():
+            if idx == index:
+                return token
+        return ""
+    
+    def save_tensor_to_txt(self, tensor, filename):
+        """将单个张量保存为文本文件"""
+        if tensor is None:
+            with open(filename, 'w') as f:
+                f.write("")
+            return
+        
+        # 使用detach()分离梯度，然后转换为numpy
+        data_array = tensor.cpu().detach().numpy().flatten()
+        data_str = " ".join(f"{x:.6f}" for x in data_array)
+        
+        with open(filename, 'w') as f:
+            f.write(data_str)
+        
+        #print(f"Saved tensor to {filename}, shape: {tensor.shape},count : {data_array.size}")
+    
+    def forward_print(self, wave_chunk):
+        feature = self.accept_wave(wave_chunk)
+        if feature is None or feature.size(0) < 1:
+            return {}  # # the feature is not enough to get result.
+
+        for batch_idx in range(feature.size(0)):
+            # 提取当前样本并添加batch维度
+            single_feature = feature[batch_idx].unsqueeze(0).unsqueeze(0)  # (1, feature_len, feature_dim)
+            # 保存输入数据
+            #self.save_tensor_to_txt(single_feature, f"dump/input_{self.forward_count}.txt")
+            #self.save_tensor_to_txt(self.in_cache, f"dump/input_cache_{self.forward_count}.txt")
+            logits, self.in_cache = self.model(single_feature, self.in_cache)
+            probs = logits.softmax(2)  # (batch_size, maxlen, vocab_size)
+            probs = probs[0].cpu()  # remove batch dimension
+            # 保存输出数据
+            #self.save_tensor_to_txt(probs, f"dump/output_{self.forward_count}.txt")
+            #self.save_tensor_to_txt(self.in_cache, f"dump/output_cache_{self.forward_count}.txt")
+            for (t, prob) in enumerate(probs):
+                t *= self.downsampling
+                absolute_time = t + self.total_frames
+                # 找出所有概率大于0.05的索引
+                mask = prob > 0.05
+                high_prob_indices = torch.where(mask)[0]
+                # if high_prob_indices.size(dim=0) > 0:
+                #     print(f"batch : {self.batch_count}")
+                high_probs = prob[mask]
+                sorted_probs, sorted_indices = torch.sort(high_probs, descending=True)
+                for idx, prob_value in zip(high_prob_indices[sorted_indices], sorted_probs):
+                    if idx == 0:
+                        continue
+                    token = self.find_token_by_index(idx.item())
+                    prob_value = prob[idx].item()
+                    print(f"frame : {self.batch_count} time: {absolute_time / 100.0}s :  {token} : {idx} -> {prob_value:.4f}")
+                
+                self.batch_count += 1
+            self.total_frames += len(probs) * self.downsampling
+            self.forward_count += 1
+        return {}
 
     def reset(self):
         self.cur_hyps = [(tuple(), (1.0, 0.0, []))]
@@ -542,7 +633,11 @@ def demo():
 
     # actually this could be done in __init__ method,
     # we pull it outside for changing keywords more freely.
-    kws.set_keywords(args.keywords)
+    # kws.set_keywords(args.keywords)
+    keywords_list = args.keywords.strip().replace(' ', '').split(',')
+    kws.set_tokens(keywords_list)
+    kws.reset()
+    
 
     if args.wav_path:
         # Caution: input WAV should be standard 16k, 16 bits, 1 channel
@@ -559,8 +654,9 @@ def demo():
         interval = int(0.3 * 16000) * 2
         for i in range(0, len(wav), interval):
             chunk_wav = wav[i:min(i + interval, len(wav))]
-            result = kws.forward(chunk_wav)
-            print(result)
+            # kws.forward(chunk_wav)
+            result = kws.forward_print(chunk_wav)
+            # print(result)
 
     fout = None
     if args.result_file:
@@ -590,7 +686,7 @@ def demo():
                 interval = int(0.3 * 16000) * 2
                 for i in range(0, len(wav), interval):
                     chunk_wav = wav[i:min(i + interval, len(wav))]
-                    result = kws.forward(chunk_wav)
+                    result = kws.forward_print(chunk_wav)
                     if 'state' in result and result['state'] == 1:
                         activated = True
                         if fout:

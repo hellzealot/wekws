@@ -23,6 +23,8 @@ import torch
 import torch.distributed as dist
 import torch.optim as optim
 import yaml
+from wekws.bin.EnglishTokenizer import EnglishTokenizer
+from wekws.bin.PinyinTokenizer import PinyinTokenizer
 from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader
 
@@ -32,7 +34,6 @@ from wekws.model.kws_model import init_model
 from wekws.utils.executor import Executor
 from wekws.utils.train_utils import count_parameters, set_mannul_seed
 from wenet.text.char_tokenizer import CharTokenizer
-
 
 def get_args():
     parser = argparse.ArgumentParser(description='training your network')
@@ -110,10 +111,12 @@ def main():
     cv_conf['spec_aug'] = False
     cv_conf['shuffle'] = False
 
-    tokenizer = CharTokenizer(f'{args.dict}/dict.txt',
-                              f'{args.dict}/words.txt',
-                              unk='<filler>',
-                              split_with_space=True)
+    # tokenizer = CharTokenizer(f'{args.dict}/dict.txt',
+    #                           f'{args.dict}/words.txt',
+    #                           unk='<filler>',
+    #                           split_with_space=True)
+    #tokenizer = EnglishTokenizer()
+    tokenizer = PinyinTokenizer(f'{args.dict}/vocab.txt')
     train_dataset = init_dataset(data_list_file=args.train_data,
                                  conf=train_conf,
                                  tokenizer=tokenizer)

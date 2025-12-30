@@ -1,0 +1,1 @@
+python tools/compute_cmvn_stats_list.py --num_workers 16 --train_config conf/fsmn_ctc.yaml --in_list /mnt/h/GigaSpeechV1/KWS/train.json --out_cmvn /mnt/h/GigaSpeechV1/KWS/global_cmvn

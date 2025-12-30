@@ -165,42 +165,76 @@ def init_model(configs):
         left_stride = configs['backbone']['left_stride']
         right_stride = configs['backbone']['right_stride']
         output_affine_dim = configs['backbone']['output_affine_dim']
+        
+        # >>>>>> 修改开始: 动态决定 FSMN 的输出维度 >>>>>>
+        # 检查是否使用了 advanced 分类器
+        if 'classifier' in configs and configs['classifier']['type'] == 'advanced':
+            # 如果是 advanced 模式，Backbone 应该输出特征 (140)，而不是 Logits (71)
+            backbone_output_dim = output_affine_dim
+            # 【关键】更新 hidden_dim 变量，让后续的 classifier 知道输入是 140
+            hidden_dim = output_affine_dim 
+        else:
+            # 传统模式，Backbone 直接输出分类 Logits (71)
+            backbone_output_dim = output_dim
+
         backbone = FSMN(input_dim, input_affine_dim, num_layers, linear_dim,
                         proj_dim, left_order, right_order, left_stride,
-                        right_stride, output_affine_dim, output_dim)
+                        right_stride, output_affine_dim, backbone_output_dim)
+        # <<<<<< 修改结束 <<<<<<
 
     else:
         print('Unknown body type {}'.format(backbone_type))
         sys.exit(1)
+
     if 'classifier' in configs:
-        # For speech command dataset, we use 2 FC layer as classifier,
-        # we add dropout after first FC layer to prevent overfitting
         classifier_type = configs['classifier']['type']
         dropout = configs['classifier']['dropout']
-
-        classifier_base = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(),
-                                        nn.Dropout(dropout),
-                                        nn.Linear(64, output_dim))
+        
         if classifier_type == 'global':
-            # global means we add a global average pooling before classifier
+            classifier_base = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(),
+                                            nn.Dropout(dropout),
+                                            nn.Linear(64, output_dim))
             classifier = GlobalClassifier(classifier_base)
+            activation = nn.Identity()
+            
         elif classifier_type == 'last':
-            # last means we use last frame to do backpropagation, so the model
-            # can be infered streamingly
+            classifier_base = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(),
+                                            nn.Dropout(dropout),
+                                            nn.Linear(64, output_dim))
             classifier = LastClassifier(classifier_base)
+            activation = nn.Identity()
+            
         elif classifier_type == 'identity':
             classifier = nn.Identity()
+            activation = nn.Identity()
+
+        # >>>>>> Advanced Classifier 分支 >>>>>>
+        elif classifier_type == 'advanced':
+            # 这里 hidden_dim 已经被上面的 FSMN 逻辑更新为 140 了，所以可以直接用
+            hidden_units = 128 # 或者从 configs 读取: configs['classifier'].get('hidden_units', 128)
+            
+            classifier = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_units), # 140 -> 128
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                
+                nn.Linear(hidden_units, hidden_units), # 128 -> 128
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                
+                nn.Linear(hidden_units, output_dim)    # 128 -> 74
+            )
+            activation = nn.Identity()
+        # <<<<<< Advanced Classifier 分支结束 <<<<<<
+            
         else:
             print('Unknown classifier type {}'.format(classifier_type))
             sys.exit(1)
-        activation = nn.Identity()
+            
     else:
         classifier = LinearClassifier(hidden_dim, output_dim)
         activation = nn.Sigmoid()
 
-    # Here we add a possible "activation_type",
-    # one can choose to use other activation function.
-    # We use nn.Identity just for CTC loss
     if "activation" in configs:
         activation_type = configs["activation"]["type"]
         if activation_type == 'identity':

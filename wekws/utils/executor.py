@@ -56,7 +56,7 @@ class Executor:
                                   feats_lengths,
                                   target_lengths=label_lengths,
                                   min_duration=min_duration,
-                                  validation=False)
+                                  validation=True)
             optimizer.zero_grad()
             loss.backward()
             grad_norm = clip_grad_norm_(model.parameters(), clip)
